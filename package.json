@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "cd client && npm install && npm run build && cd ../server && npm install && npm run build",
-    "start": "npx tsx server/src/index.ts",
+    "start": "node server/dist/index.js",
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:client": "npm run dev --prefix client",
     "dev:server": "npm run dev --prefix server"
