@@ -1,67 +1,77 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import pg from 'pg';
 import { createHash } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import type { PlayerProfile } from './types.js';
 import { STARTING_ELO } from './types.js';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = join(__dirname, '..', 'data');
-const PLAYERS_FILE = join(DATA_DIR, 'players.json');
+const { Pool } = pg;
 
-interface StoreData {
-  players: Record<string, PlayerProfile>;
-}
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+});
 
 function hashPassword(pw: string): string {
   return createHash('sha256').update(pw).digest('hex');
 }
 
-function ensureDataDir(): void {
-  if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+function rowToProfile(row: Record<string, unknown>): PlayerProfile {
+  return {
+    id: row.id as string,
+    name: row.name as string,
+    passwordHash: row.password_hash as string,
+    elo: row.elo as number,
+    wins: row.wins as number,
+    losses: row.losses as number,
+    matchesPlayed: row.matches_played as number,
+  };
 }
 
-function loadStore(): StoreData {
-  ensureDataDir();
-  if (!existsSync(PLAYERS_FILE)) return { players: {} };
-  try {
-    return JSON.parse(readFileSync(PLAYERS_FILE, 'utf-8')) as StoreData;
-  } catch {
-    return { players: {} };
-  }
+export async function initDb(): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS players (
+      id TEXT PRIMARY KEY,
+      name TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      elo INTEGER NOT NULL DEFAULT ${STARTING_ELO},
+      wins INTEGER NOT NULL DEFAULT 0,
+      losses INTEGER NOT NULL DEFAULT 0,
+      matches_played INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+  console.log('[db] players table ready');
 }
-
-function saveStore(data: StoreData): void {
-  ensureDataDir();
-  writeFileSync(PLAYERS_FILE, JSON.stringify(data, null, 2), 'utf-8');
-}
-
-let cache = loadStore();
 
 export type AuthResult =
   | { ok: true; profile: PlayerProfile }
   | { ok: false; error: 'name_taken' | 'wrong_password' };
 
-/** Register a new account or login to an existing one. */
-export function authenticate(name: string, password: string): AuthResult {
+export async function authenticate(name: string, password: string): Promise<AuthResult> {
   const normalized = name.trim().slice(0, 20);
   const hash = hashPassword(password);
 
-  const existing = Object.values(cache.players).find(
-    (p) => p.name.toLowerCase() === normalized.toLowerCase()
+  const { rows } = await pool.query(
+    'SELECT * FROM players WHERE LOWER(name) = LOWER($1)',
+    [normalized]
   );
 
-  if (existing) {
-    if (existing.passwordHash !== hash) {
+  if (rows.length > 0) {
+    const profile = rowToProfile(rows[0]);
+    if (profile.passwordHash !== hash) {
       return { ok: false, error: 'wrong_password' };
     }
-    return { ok: true, profile: existing };
+    return { ok: true, profile };
   }
 
   // New player — register
+  const id = uuidv4();
+  await pool.query(
+    'INSERT INTO players (id, name, password_hash, elo, wins, losses, matches_played) VALUES ($1, $2, $3, $4, 0, 0, 0)',
+    [id, normalized, hash, STARTING_ELO]
+  );
+
   const profile: PlayerProfile = {
-    id: uuidv4(),
+    id,
     name: normalized,
     passwordHash: hash,
     elo: STARTING_ELO,
@@ -69,34 +79,36 @@ export function authenticate(name: string, password: string): AuthResult {
     losses: 0,
     matchesPlayed: 0,
   };
-  cache.players[profile.id] = profile;
-  saveStore(cache);
   return { ok: true, profile };
 }
 
-export function updatePlayer(profile: PlayerProfile): void {
-  cache.players[profile.id] = profile;
-  saveStore(cache);
+export async function updatePlayer(profile: PlayerProfile): Promise<void> {
+  await pool.query(
+    'UPDATE players SET elo=$1, wins=$2, losses=$3, matches_played=$4 WHERE id=$5',
+    [profile.elo, profile.wins, profile.losses, profile.matchesPlayed, profile.id]
+  );
 }
 
-export function getLeaderboard(limit = 10): Omit<PlayerProfile, 'passwordHash'>[] {
-  return Object.values(cache.players)
-    .sort((a, b) => b.elo - a.elo)
-    .slice(0, limit)
-    .map(({ passwordHash: _ph, ...rest }) => rest);
+export async function getLeaderboard(limit = 10): Promise<Omit<PlayerProfile, 'passwordHash'>[]> {
+  const { rows } = await pool.query(
+    'SELECT * FROM players ORDER BY elo DESC LIMIT $1',
+    [limit]
+  );
+  return rows.map(rowToProfile).map(({ passwordHash: _ph, ...rest }) => rest);
 }
 
-export function getPlayerRank(profileId: string): number {
-  const target = cache.players[profileId];
-  if (!target) return 0;
-  // Count players with strictly higher ELO, then add 1
-  let ahead = 0;
-  for (const p of Object.values(cache.players)) {
-    if (p.id !== profileId && p.elo > target.elo) ahead++;
-  }
-  return ahead + 1;
+export async function getPlayerRank(profileId: string): Promise<number> {
+  const { rows } = await pool.query(
+    `SELECT COUNT(*) AS ahead FROM players
+     WHERE elo > (SELECT elo FROM players WHERE id = $1)`,
+    [profileId]
+  );
+  if (rows.length === 0) return 0;
+  return parseInt(rows[0].ahead as string, 10) + 1;
 }
 
-export function getPlayerById(id: string): PlayerProfile | undefined {
-  return cache.players[id];
+export async function getPlayerById(id: string): Promise<PlayerProfile | undefined> {
+  const { rows } = await pool.query('SELECT * FROM players WHERE id = $1', [id]);
+  if (rows.length === 0) return undefined;
+  return rowToProfile(rows[0]);
 }

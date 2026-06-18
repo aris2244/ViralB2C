@@ -6,6 +6,7 @@ import { join, dirname } from 'path';
 import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import {
+  initDb,
   authenticate,
   updatePlayer,
   getLeaderboard,
@@ -79,10 +80,10 @@ function generatePartyCode(): string {
   return code;
 }
 
-function getSession(socketId: string): PlayerSession | null {
+async function getSession(socketId: string): Promise<PlayerSession | null> {
   const profileId = socketToProfile.get(socketId);
   if (!profileId) return null;
-  const profile = getPlayerById(profileId);
+  const profile = await getPlayerById(profileId);
   if (!profile) return null;
   return { socketId, profileId: profile.id, name: profile.name, elo: profile.elo };
 }
@@ -159,9 +160,10 @@ setInterval(() => {
 
 // ── ELO helpers ───────────────────────────────────────────────────────────────
 
-function buildMatchResult(match: Match, winnerId: string | null) {
-  const p1 = getPlayerById(match.player1.profileId)!;
-  const p2 = getPlayerById(match.player2.profileId)!;
+async function buildMatchResult(match: Match, winnerId: string | null) {
+  const p1 = await getPlayerById(match.player1.profileId);
+  const p2 = await getPlayerById(match.player2.profileId);
+  if (!p1 || !p2) throw new Error('Player not found during buildMatchResult');
 
   let p1c = 0, p2c = 0;
   if (winnerId === p1.id) {
@@ -180,7 +182,8 @@ function buildMatchResult(match: Match, winnerId: string | null) {
   p1.elo = Math.max(0, p1.elo + p1c);
   p2.elo = Math.max(0, p2.elo + p2c);
   p1.matchesPlayed++; p2.matchesPlayed++;
-  updatePlayer(p1); updatePlayer(p2);
+  await updatePlayer(p1);
+  await updatePlayer(p2);
 
   return {
     winnerId, isDraw: winnerId === null,
@@ -192,10 +195,10 @@ function buildMatchResult(match: Match, winnerId: string | null) {
   };
 }
 
-function finalizeMatch(match: Match): void {
+async function finalizeMatch(match: Match): Promise<void> {
   match.phase = 'match_result';
   const winnerId = getMatchWinnerId(match);
-  const result = buildMatchResult(match, winnerId);
+  const result = await buildMatchResult(match, winnerId);
 
   const payload = { ...result, isFriendMatch: match.isFriendMatch };
   for (const s of [match.player1, match.player2]) {
@@ -217,9 +220,9 @@ function finalizeMatch(match: Match): void {
   }
 }
 
-function forfeitMatchAfk(match: Match, afkId: string): void {
+async function forfeitMatchAfk(match: Match, afkId: string): Promise<void> {
   const winner = match.player1.profileId === afkId ? match.player2 : match.player1;
-  const result = buildMatchResult(match, winner.profileId);
+  const result = await buildMatchResult(match, winner.profileId);
   const afkSid = profileToSocket.get(afkId);
   const winSid = profileToSocket.get(winner.profileId);
   if (afkSid) io.to(afkSid).emit('match:afk_kicked');
@@ -237,19 +240,33 @@ function cleanupMatch(match: Match): void {
 setInterval(() => {
   for (const match of activeMatches.values()) {
     const idle = getIdlePlayersPastAfk(match);
-    if (idle.length > 0) forfeitMatchAfk(match, idle[0]);
+    if (idle.length > 0) {
+      forfeitMatchAfk(match, idle[0]).catch(console.error);
+    }
   }
 }, 500);
 
 // ── REST ──────────────────────────────────────────────────────────────────────
 
-app.get('/api/leaderboard', (_req, res) => res.json(getLeaderboard(10)));
+app.get('/api/leaderboard', async (_req, res) => {
+  try {
+    res.json(await getLeaderboard(10));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'internal' });
+  }
+});
 
-app.get('/api/rank/:profileId', (req, res) => {
-  const profile = getPlayerById(req.params.profileId);
-  if (!profile) { res.status(404).json({ error: 'not found' }); return; }
-  const rank = getPlayerRank(req.params.profileId);
-  res.json({ rank, elo: profile.elo, name: profile.name });
+app.get('/api/rank/:profileId', async (req, res) => {
+  try {
+    const profile = await getPlayerById(req.params.profileId);
+    if (!profile) { res.status(404).json({ error: 'not found' }); return; }
+    const rank = await getPlayerRank(req.params.profileId);
+    res.json({ rank, elo: profile.elo, name: profile.name });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'internal' });
+  }
 });
 
 app.get('/api/health', (_req, res) =>
@@ -277,28 +294,33 @@ if (existsSync(indexHtml)) {
 io.on('connection', (socket) => {
 
   // Auth
-  socket.on('auth:login', ({ name, password }: { name: string; password: string }) => {
-    const result = authenticate(name, password);
-    if (!result.ok) {
-      socket.emit('auth:error', {
-        error: result.error,
-        message: result.error === 'name_taken' ? 'Name not available' : 'Wrong password',
+  socket.on('auth:login', async ({ name, password }: { name: string; password: string }) => {
+    try {
+      const result = await authenticate(name, password);
+      if (!result.ok) {
+        socket.emit('auth:error', {
+          error: result.error,
+          message: result.error === 'name_taken' ? 'Name not available' : 'Wrong password',
+        });
+        return;
+      }
+      const p = result.profile;
+      socketToProfile.set(socket.id, p.id);
+      profileToSocket.set(p.id, socket.id);
+      socket.emit('auth:ok', {
+        id: p.id, name: p.name, elo: p.elo,
+        wins: p.wins, losses: p.losses, matchesPlayed: p.matchesPlayed,
+        rank: getRank(p.elo),
       });
-      return;
+    } catch (e) {
+      console.error(e);
+      socket.emit('auth:error', { error: 'server_error', message: 'Server error, try again' });
     }
-    const p = result.profile;
-    socketToProfile.set(socket.id, p.id);
-    profileToSocket.set(p.id, socket.id);
-    socket.emit('auth:ok', {
-      id: p.id, name: p.name, elo: p.elo,
-      wins: p.wins, losses: p.losses, matchesPlayed: p.matchesPlayed,
-      rank: getRank(p.elo),
-    });
   });
 
   // Ranked queue
-  socket.on('queue:join', () => {
-    const session = getSession(socket.id);
+  socket.on('queue:join', async () => {
+    const session = await getSession(socket.id);
     if (!session || profileToMatch.has(session.profileId)) return;
     removeFromQueue(session.profileId);
     queue.push({ session, joinedAt: Date.now() });
@@ -306,16 +328,16 @@ io.on('connection', (socket) => {
     tryMatchmake();
   });
 
-  socket.on('queue:leave', () => {
-    const session = getSession(socket.id);
+  socket.on('queue:leave', async () => {
+    const session = await getSession(socket.id);
     if (!session) return;
     removeFromQueue(session.profileId);
     socket.emit('queue:status', { inQueue: false, position: 0 });
   });
 
   // Party / Play with Friend
-  socket.on('party:create', () => {
-    const session = getSession(socket.id);
+  socket.on('party:create', async () => {
+    const session = await getSession(socket.id);
     if (!session) return;
     if (profileToMatch.has(session.profileId)) return;
 
@@ -331,8 +353,8 @@ io.on('connection', (socket) => {
     socket.emit('party:created', { code });
   });
 
-  socket.on('party:cancel', () => {
-    const session = getSession(socket.id);
+  socket.on('party:cancel', async () => {
+    const session = await getSession(socket.id);
     if (!session) return;
     for (const [code, entry] of partyCodes.entries()) {
       if (entry.creatorProfileId === session.profileId) {
@@ -343,8 +365,8 @@ io.on('connection', (socket) => {
     socket.emit('party:cancelled');
   });
 
-  socket.on('party:join', (code: string) => {
-    const joiner = getSession(socket.id);
+  socket.on('party:join', async (code: string) => {
+    const joiner = await getSession(socket.id);
     if (!joiner) return;
     if (profileToMatch.has(joiner.profileId)) return;
 
@@ -360,7 +382,7 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const creatorProfile = getPlayerById(entry.creatorProfileId);
+    const creatorProfile = await getPlayerById(entry.creatorProfileId);
     if (!creatorProfile) {
       partyCodes.delete(normalized);
       socket.emit('party:error', { message: 'Party host is no longer online' });
@@ -394,25 +416,24 @@ io.on('connection', (socket) => {
   });
 
   // Match actions
-  socket.on('round:start_timer', () => {
-    const session = getSession(socket.id);
+  socket.on('round:start_timer', async () => {
+    const session = await getSession(socket.id);
     if (!session) return;
     const match = activeMatches.get(profileToMatch.get(session.profileId) ?? '');
     if (!match) return;
     if (startPlayerTimer(match, session.profileId)) emitMatchState(match);
   });
 
-  socket.on('round:submit', (timeMs: number) => {
-    const session = getSession(socket.id);
+  socket.on('round:submit', async (timeMs: number) => {
+    const session = await getSession(socket.id);
     if (!session) return;
     const match = activeMatches.get(profileToMatch.get(session.profileId) ?? '');
     if (!match) return;
     if (!submitTime(match, session.profileId, timeMs)) return;
     if (bothFinished(match)) {
       resolveRound(match);
-      // If this was the deciding round, go straight to match result — no extra SPACE needed
       if (isMatchOver(match)) {
-        finalizeMatch(match);
+        await finalizeMatch(match);
         cleanupMatch(match);
         return;
       }
@@ -420,20 +441,20 @@ io.on('connection', (socket) => {
     emitMatchState(match);
   });
 
-  socket.on('round:continue', () => {
-    const session = getSession(socket.id);
+  socket.on('round:continue', async () => {
+    const session = await getSession(socket.id);
     if (!session) return;
     const match = activeMatches.get(profileToMatch.get(session.profileId) ?? '');
     if (!match || match.phase !== 'round_result') return;
     match.readyPlayers.add(session.profileId);
     if (!bothReady(match)) { emitMatchState(match); return; }
-    if (isMatchOver(match)) { finalizeMatch(match); cleanupMatch(match); return; }
+    if (isMatchOver(match)) { await finalizeMatch(match); cleanupMatch(match); return; }
     nextRound(match);
     emitMatchState(match);
   });
 
-  socket.on('match:new_game', () => {
-    const session = getSession(socket.id);
+  socket.on('match:new_game', async () => {
+    const session = await getSession(socket.id);
     if (!session) return;
     removeFromQueue(session.profileId);
     queue.push({ session, joinedAt: Date.now() });
@@ -441,8 +462,8 @@ io.on('connection', (socket) => {
     tryMatchmake();
   });
 
-  socket.on('friend:rematch', () => {
-    const session = getSession(socket.id);
+  socket.on('friend:rematch', async () => {
+    const session = await getSession(socket.id);
     if (!session) return;
 
     // Find this player's pending friend rematch entry
@@ -463,10 +484,9 @@ io.on('connection', (socket) => {
     const opponentSid = profileToSocket.get(opponentId);
 
     if (pending.player1Wants && pending.player2Wants) {
-      // Both want rematch — launch a new friend match
       pendingFriendRematches.delete(key);
-      const p1Profile = getPlayerById(pending.player1Id);
-      const p2Profile = getPlayerById(pending.player2Id);
+      const p1Profile = await getPlayerById(pending.player1Id);
+      const p2Profile = await getPlayerById(pending.player2Id);
       if (!p1Profile || !p2Profile) return;
       const p1Sid = profileToSocket.get(pending.player1Id);
       const p2Sid = profileToSocket.get(pending.player2Id);
@@ -476,14 +496,13 @@ io.on('connection', (socket) => {
       const p2: PlayerSession = { socketId: p2Sid, profileId: p2Profile.id, name: p2Profile.name, elo: p2Profile.elo };
       launchMatch(p1, p2, true);
     } else {
-      // Tell opponent you want a rematch
       if (opponentSid) io.to(opponentSid).emit('friend:opponent_wants_rematch');
       socket.emit('friend:waiting_for_rematch');
     }
   });
 
-  socket.on('friend:go_lobby', () => {
-    const session = getSession(socket.id);
+  socket.on('friend:go_lobby', async () => {
+    const session = await getSession(socket.id);
     if (!session) return;
 
     let key: string | null = null;
@@ -538,10 +557,17 @@ io.on('connection', (socket) => {
   });
 });
 
-// Listen on 0.0.0.0 so Railway (and any reverse-proxy host) can reach the process.
-// Binding to 'localhost' only accepts loopback connections and breaks hosted deployments.
-httpServer.listen(Number(PORT), '0.0.0.0', () => {
-  console.log(`Chrono Duel server listening on 0.0.0.0:${PORT}`);
-  console.log(`Client dist path: ${clientDist}`);
-  console.log(`Client dist exists: ${existsSync(indexHtml)}`);
-});
+// ── Start ─────────────────────────────────────────────────────────────────────
+
+initDb()
+  .then(() => {
+    httpServer.listen(Number(PORT), '0.0.0.0', () => {
+      console.log(`Chrono Duel server listening on 0.0.0.0:${PORT}`);
+      console.log(`Client dist path: ${clientDist}`);
+      console.log(`Client dist exists: ${existsSync(indexHtml)}`);
+    });
+  })
+  .catch((err) => {
+    console.error('[fatal] Failed to initialise database:', err);
+    process.exit(1);
+  });
