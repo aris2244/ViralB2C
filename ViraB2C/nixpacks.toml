@@ -1,0 +1,15 @@
+[phases.setup]
+nixPkgs = ["nodejs_20", "npm-9_x"]
+
+[phases.install]
+# root devDeps (concurrently) — subfolders installed inside build phase
+cmds = ["npm install"]
+
+[phases.build]
+cmds = [
+  "cd client && npm install && npm run build",
+  "cd server && npm install && npm run build"
+]
+
+[start]
+cmd = "node server/dist/index.js"
