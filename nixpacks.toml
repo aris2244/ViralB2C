@@ -12,4 +12,4 @@ cmds = [
 ]
 
 [start]
-cmd = "node server/dist/index.js"
+cmd = "cd server && npx tsx src/index.ts"
