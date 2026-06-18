@@ -1,22 +1,19 @@
 {
-  "name": "chrono-duel-server",
+  "name": "chrono-duel",
   "private": true,
   "version": "1.0.0",
-  "type": "module",
- "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "tsc",
-    "start": "npx tsx src/index.ts"
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
   },
-  "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^4.21.2",
-    "socket.io": "^4.8.1",
-    "uuid": "^11.1.0",
-    "typescript": "~5.7.2",
-    "tsx": "^4.19.3",
-    "@types/cors": "^2.8.17",
-    "@types/express": "^5.0.0",
-    "@types/node": "^22.13.10"
+  "scripts": {
+    "build": "cd client && npm install && npm run build && cd ../server && npm install && npm run build",
+    "start": "npx tsx server/src/index.ts",
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:client": "npm run dev --prefix client",
+    "dev:server": "npm run dev --prefix server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
   }
 }
