@@ -628,6 +628,21 @@ kbd {
 
 .hint { color: var(--muted); font-size: 0.9rem; }
 
+.tap-target {
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  transition: background 0.1s;
+}
+.tap-target:active { background: rgba(255,255,255,0.04); }
+
+.tap-hint {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-top: 0.5rem;
+}
+
 /* ── Dual Slots ─────────────────────────────────────────── */
 
 .dual-slots {

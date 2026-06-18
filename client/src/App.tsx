@@ -152,27 +152,32 @@ function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const handleAction = useCallback(() => {
+    if (screen !== 'match' || !matchState) return;
+
+    if (matchState.phase === 'playing') {
+      if (!timerRunning && matchState.myState !== 'done') {
+        gameSocket.startTimer();
+        startTimeRef.current = performance.now();
+        setTimerRunning(true);
+        music.play('match');
+      } else if (timerRunning) {
+        const elapsed = performance.now() - startTimeRef.current;
+        setTimerRunning(false);
+        gameSocket.submitTime(Math.round(elapsed));
+        music.stop(600);
+      }
+    }
+
+    if (matchState.phase === 'round_result') gameSocket.continueRound();
+  }, [screen, matchState, timerRunning]);
+
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.code !== 'Space' || e.repeat) return;
     if (screen !== 'match' || !matchState) return;
     e.preventDefault();
-
-    if (matchState.phase === 'playing') {
-        if (!timerRunning && matchState.myState !== 'done') {
-          gameSocket.startTimer();
-          startTimeRef.current = performance.now();
-          setTimerRunning(true);
-          music.play('match'); // match music starts when player starts their timer
-        } else if (timerRunning) {
-          const elapsed = performance.now() - startTimeRef.current;
-          setTimerRunning(false);
-          gameSocket.submitTime(Math.round(elapsed));
-          music.stop(600);    // fade out when timer stops
-        }
-      }
-
-    if (matchState.phase === 'round_result') gameSocket.continueRound();
-  }, [screen, matchState, timerRunning]);
+    handleAction();
+  }, [screen, matchState, handleAction]);
 
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
@@ -230,7 +235,7 @@ function App() {
           </div>
         )}
         {screen === 'match' && matchState && (
-          <MatchView state={matchState} timerRunning={timerRunning} />
+          <MatchView state={matchState} timerRunning={timerRunning} onAction={handleAction} />
         )}
         {screen === 'result' && matchResult && profile && (
           <ResultView
@@ -669,7 +674,7 @@ function PlayerSlot({
 
 // ── Match View ────────────────────────────────────────────────────────────────
 
-function MatchView({ state, timerRunning }: { state: MatchState; timerRunning: boolean }) {
+function MatchView({ state, timerRunning, onAction }: { state: MatchState; timerRunning: boolean; onAction: () => void }) {
   const myWins = state.isPlayer1 ? state.player1Wins : state.player2Wins;
   const oppWins = state.isPlayer1 ? state.player2Wins : state.player1Wins;
   const afkActive = state.phase === 'playing' && state.myState === 'idle' && !timerRunning;
@@ -677,6 +682,11 @@ function MatchView({ state, timerRunning }: { state: MatchState; timerRunning: b
   const myDisplayState: PlayerPlayState =
     timerRunning && state.myState !== 'done' ? 'running' : state.myState;
   const lastRound = state.roundResults[state.roundResults.length - 1];
+
+  const handleTap = (e: React.MouseEvent | React.TouchEvent) => {
+    e.preventDefault();
+    onAction();
+  };
 
   return (
     <div className="match">
@@ -690,7 +700,13 @@ function MatchView({ state, timerRunning }: { state: MatchState; timerRunning: b
       </div>
 
       {state.phase === 'playing' && (
-        <div className="game-area panel">
+        <div
+          className="game-area panel tap-target"
+          onClick={handleTap}
+          onTouchEnd={handleTap}
+          role="button"
+          tabIndex={0}
+        >
           <p className="phase-label">TARGET TIME</p>
           <div className="target-display timer-num">{state.targetFormatted}s</div>
           <div className="dual-slots">
@@ -701,6 +717,7 @@ function MatchView({ state, timerRunning }: { state: MatchState; timerRunning: b
             <PlayerSlot side="right" name={state.opponent.name} state={state.opponentState}
               timeMs={state.opponentTimeMs} targetMs={state.targetMs} />
           </div>
+          <p className="tap-hint">Tap to start / stop · <kbd>SPACE</kbd></p>
         </div>
       )}
 
@@ -709,7 +726,13 @@ function MatchView({ state, timerRunning }: { state: MatchState; timerRunning: b
         const oppTime = state.isPlayer1 ? lastRound.player2TimeMs : lastRound.player1TimeMs;
         const won = lastRound.winnerId === state.me.id;
         return (
-          <div className="game-area panel">
+          <div
+            className="game-area panel tap-target"
+            onClick={handleTap}
+            onTouchEnd={handleTap}
+            role="button"
+            tabIndex={0}
+          >
             <p className="phase-label">ROUND {state.round} RESULT</p>
             <div className={`round-verdict ${won ? 'win' : lastRound.isDraw ? 'draw' : 'lose'}`}>
               {lastRound.isDraw ? 'DRAW' : won ? 'ROUND WON!' : 'ROUND LOST'}
@@ -722,8 +745,8 @@ function MatchView({ state, timerRunning }: { state: MatchState; timerRunning: b
               <div className="slots-divider" />
               <PlayerSlot side="right" name={state.opponent.name} state="done" timeMs={oppTime} targetMs={lastRound.targetMs} />
             </div>
-            <p className="hint">
-              Press <kbd>SPACE</kbd> for next round
+            <p className="tap-hint">
+              Tap for next round · <kbd>SPACE</kbd>
               {state.readyCount < 2 && ` (${state.readyCount}/2 ready)`}
             </p>
           </div>
