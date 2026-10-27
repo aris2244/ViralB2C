@@ -52,10 +52,15 @@ npm start       # runs node server/dist/index.js
 
 1. Push the repo to GitHub
 2. Create a new Railway project → **Deploy from GitHub repo**
-3. Railway auto-detects `nixpacks.toml` and runs the build
-4. Set no environment variables (PORT is injected automatically)
-5. Done — your app is live
+3. Add a **Postgres** database to the project (Railway sets `DATABASE_URL` automatically for services in the same project)
+4. Railway auto-detects `nixpacks.toml` and runs the build
+5. No other environment variables are required — `PORT` is injected automatically too
+6. Done — your app is live
 
-> **Data persistence**: Player accounts are stored in `server/data/players.json`.
-> This file is lost on every redeploy with Railway's default ephemeral filesystem.
-> To persist data, add a **Railway Volume** mounted at `/app/server/data`.
+> **Data persistence**: player accounts, ELO, and match history are stored in **Postgres** (`server/src/store.ts`, via `DATABASE_URL`), not in a local file — so a redeploy or restart doesn't lose any data, as long as the Postgres service itself keeps running.
+
+## Security notes
+
+Passwords are hashed with **bcrypt** (salted, adaptive cost) in `server/src/store.ts`. An earlier version hashed passwords with plain unsalted SHA-256 and had a leftover `server/data/players.json` file — a stale, unused local-file fallback from before Postgres was added — committed to the repo with real-looking usernames and those weak password hashes. That file has been deleted and is now git-ignored (`server/data/`); the authentication code was rewritten to use bcrypt instead. If you're resuming this project from an older clone or database snapshot that still has SHA-256 hashes in it, those accounts simply won't be able to log in anymore (`bcrypt.compare` returns false for a non-bcrypt hash) — they'll need to register again with a new password.
+
+No API keys or database credentials were found hardcoded anywhere in this repository's source or its git history — `DATABASE_URL` is read from the environment everywhere it's used.

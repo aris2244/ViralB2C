@@ -1,5 +1,5 @@
 import pg from 'pg';
-import { createHash } from 'crypto';
+import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import type { PlayerProfile } from './types.js';
 import { STARTING_ELO } from './types.js';
@@ -11,8 +11,17 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
 });
 
-function hashPassword(pw: string): string {
-  return createHash('sha256').update(pw).digest('hex');
+const SALT_ROUNDS = 10;
+
+function hashPassword(pw: string): Promise<string> {
+  return bcrypt.hash(pw, SALT_ROUNDS);
+}
+
+function verifyPassword(pw: string, hash: string): Promise<boolean> {
+  // Old accounts (before the bcrypt migration) have a 64-char hex SHA-256
+  // hash instead of a bcrypt hash — bcrypt.compare safely returns false for
+  // those rather than throwing, so they just need to register again.
+  return bcrypt.compare(pw, hash).catch(() => false);
 }
 
 function rowToProfile(row: Record<string, unknown>): PlayerProfile {
@@ -48,7 +57,6 @@ export type AuthResult =
 
 export async function authenticate(name: string, password: string): Promise<AuthResult> {
   const normalized = name.trim().slice(0, 20);
-  const hash = hashPassword(password);
 
   const { rows } = await pool.query(
     'SELECT * FROM players WHERE LOWER(name) = LOWER($1)',
@@ -57,7 +65,8 @@ export async function authenticate(name: string, password: string): Promise<Auth
 
   if (rows.length > 0) {
     const profile = rowToProfile(rows[0]);
-    if (profile.passwordHash !== hash) {
+    const valid = await verifyPassword(password, profile.passwordHash);
+    if (!valid) {
       return { ok: false, error: 'wrong_password' };
     }
     return { ok: true, profile };
@@ -65,6 +74,7 @@ export async function authenticate(name: string, password: string): Promise<Auth
 
   // New player — register
   const id = uuidv4();
+  const hash = await hashPassword(password);
   await pool.query(
     'INSERT INTO players (id, name, password_hash, elo, wins, losses, matches_played) VALUES ($1, $2, $3, $4, 0, 0, 0)',
     [id, normalized, hash, STARTING_ELO]

@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# Runtime data (no persistent storage belongs in git — this app uses Postgres)
+server/data/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
